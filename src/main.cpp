@@ -13,13 +13,16 @@
 #define dirPinStepper 26
 #define stepPinStepper 25
 #define ONOFF 23
+// Variable para seleccionar el control
+int modo = 0;
+int Read_Delay = 100;     // Periodo de muestreo en milisegundos
 // Variables de la comunicacion
 String inputString = "";      // a String to hold incoming data
 bool stringComplete = false;  // whether the string is complete
 int contadorFiltro=0;
 
 //variables del PID
-float Setpoint = 35;       // Setpoint
+float Setpoint = 0;       // Setpoint
 float Kp = 4.6726; float Tao_I = 67.70;// Constantes de PID
 float Kd=0;
 
@@ -32,7 +35,7 @@ unsigned long Tiempo_Previo_loop1=0;
 unsigned long Tiempo_Actual_loop1=0;
 unsigned long Tiempo_previo = 0; //variable para medir tiempo inicial
 unsigned long Tiempo_actual = 0; //variable para medir tiempo actual
-int Read_Delay = 1000;     // Periodo de muestreo en milisegundos
+
 
 // Variables para graficacion
 bool graficar=false;
@@ -40,9 +43,13 @@ bool graficar=false;
 bool TareaCorriendo=false;
 //Variables para el Control y sensores
 float angulo=0;
-float rawAngle=0;
+float velocidad_angular=0;
+float velocidad=0;
 float aceleracion=0;
+float angleOffset=0;//constante para calibrar el angulo a 0
 
+
+int contador;
 //declaracion de librerias
 //aceleration stepper
 FastAccelStepperEngine engine = FastAccelStepperEngine();
@@ -67,14 +74,68 @@ float LeerAngulo(){
   float angle = rawAngle * 0.08789; // Each LSB represents 0.08789 degrees
   return angle;
 }*/
+float obtenerAnguloAbsoluto(){
+  float ang = as5600.readAngle() * AS5600_RAW_TO_DEGREES;
+  
+  if (ang>180)
+  {
+    ang=360-ang;
+    ang=ang*-1;
+  }
+  
+  return ang;
+}
 
 TaskHandle_t Task1;
 void loop2(void *parameter){
   
   for(;;){
+    delay(Read_Delay);
+    if (modo==0)
+    {
+      angulo=obtenerAnguloAbsoluto();
+      if(angulo<20&&angulo>-20){
+        contador++;
+      }if (contador>50)
+      {
+        modo=1;
+        digitalWrite(LED_BUILTIN, HIGH);
+      }
+      
+    }
     
-      } //Serial.println("sEGUNDO CORE");
-      vTaskDelay(1); //NECESARIO SI LA PRIORIDAD DE LA TAREA NO ES 0//resulta que de ahuevo se ocupa
+    if (modo==1)// modo PID
+        {
+          angulo=obtenerAnguloAbsoluto();
+          velocidad_angular=as5600.getAngularSpeed();
+
+          PID_error = Setpoint - angulo;                   //Calculo del error    
+          Error_INT = Error_INT + PID_error*(1000/Read_Delay);  //Calculo de la integral del error
+          PID_value = Kp*(PID_error + (1/Tao_I)*Error_INT);     //Calculo de la salida del controlador PI
+          aceleracion=PID_value/10;
+
+          stepper->moveByAcceleration(aceleracion,true);
+          if ((angulo>20&&angulo<180)||angulo<-20&&angulo>-180)
+          {
+            stepper->forceStop();
+            aceleracion=0;
+            modo=0;
+          }
+          
+        }else if(modo==2){// modo LQR
+        }
+    /*
+    Tiempo_actual=millis();
+    if ((Tiempo_actual-Tiempo_previo)>=Read_Delay)
+    {Tiempo_previo=Tiempo_actual;
+      if (modo==0)// modo PID
+        {
+          aceleracion=aceleracion+angulo;
+        }else if(modo==1){// modo LQR
+        }
+    }*/
+      }
+      vTaskDelay(10); //NECESARIO SI LA PRIORIDAD DE LA TAREA NO ES 0//resulta que de ahuevo se ocupa
 }
   
 
@@ -124,7 +185,7 @@ void loop() {
   StaticJsonDocument<80> graph;
   char Salida_grafica[80];
   
-  Tiempo_Actual_loop1=micros();
+  Tiempo_Actual_loop1=millis();
   if (stringComplete) {//entra si hay un string completo
     Serial.println(inputString);//Escribe en la consola el ultimo string
     if (inputString.equals("ON")){
@@ -141,10 +202,16 @@ void loop() {
       Serial.print("VELOCIDAD ω = ");
       Serial.println(as5600.getAngularSpeed(AS5600_MODE_RPM));
     }else if (inputString=="ANGLE"){
-      rawAngle=as5600.readAngle();
-      angulo=rawAngle* 0.08789;
-      Serial.print("ANGULO = ");
+      angulo=obtenerAnguloAbsoluto();
       Serial.println(angulo);
+    }else if (inputString=="CALIBRATE"){
+      angleOffset=as5600.rawAngle() * AS5600_RAW_TO_DEGREES;
+      angleOffset=angleOffset-as5600.getOffset();
+      angleOffset=360-angleOffset;
+      angleOffset=angleOffset+180;//opcional para que abajo sea 180
+      as5600.setOffset(angleOffset);
+    }else if (inputString=="RESETOFFSET"){
+      as5600.setOffset(0);
     }else if (inputString=="OLSTART"){
       if (TareaCorriendo)
       {
@@ -223,15 +290,17 @@ void loop() {
     inputString = "";// Borra el string:
     stringComplete = false;//Resetea la recepcion
   }
-  if (Tiempo_Actual_loop1-Tiempo_Previo_loop1>=1000000)
+  
+  if (Tiempo_Actual_loop1-Tiempo_Previo_loop1>=Read_Delay)
   {
-    
+    Tiempo_Previo_loop1=Tiempo_Actual_loop1;
     //calculo del angulo
     if (graficar)
     {
       graph["angle"] = angulo;
       graph["aceleration"] = aceleracion;
-      graph["setpoint"] = Setpoint;
+      graph["velocidad angular"]=velocidad_angular;
+ //     graph["setpoint"] = Setpoint;
       serializeJson(graph, Salida_grafica);
       Serial.println(Salida_grafica);
     }
